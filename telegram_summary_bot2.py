@@ -17,6 +17,14 @@ from openai import OpenAI
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 
+# 🔐 CONTROL DE ACCESO: Lista de IDs de grupos permitidos
+# Para obtener el ID de un grupo, agrega el bot y usa /chatid
+# Deja la lista vacía [] para permitir todos los grupos
+GRUPOS_PERMITIDOS = [
+    # -1001234567890,  # Ejemplo: ID de grupo
+    # -1009876543210,  # Ejemplo: Otro grupo
+]
+
 # Cliente de OpenAI
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -69,11 +77,40 @@ def inicializar_db():
     conn.close()
     print("✅ Base de datos inicializada")
 
+def verificar_acceso(chat_id: int) -> bool:
+    """Verifica si el grupo tiene permiso para usar el bot"""
+    # Si la lista está vacía, permitir todos los grupos
+    if not GRUPOS_PERMITIDOS:
+        return True
+    
+    # Verificar si el chat_id está en la lista de permitidos
+    return chat_id in GRUPOS_PERMITIDOS
+
+async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando para obtener el ID del chat actual"""
+    chat_id = update.effective_chat.id
+    chat_type = update.effective_chat.type
+    chat_title = update.effective_chat.title or "Chat privado"
+    
+    mensaje = f"""🔍 <b>Información del Chat</b>
+
+📱 <b>ID del Chat:</b> <code>{chat_id}</code>
+📂 <b>Tipo:</b> {chat_type}
+📝 <b>Título:</b> {chat_title}
+
+💡 Copia este ID para agregarlo a GRUPOS_PERMITIDOS"""
+    
+    await update.message.reply_text(mensaje, parse_mode='HTML')
+
 async def guardar_mensaje_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Guarda todos los mensajes del grupo en la base de datos"""
     
     # Solo guardar mensajes de grupos
     if update.effective_chat.type not in ['group', 'supergroup']:
+        return
+    
+    # 🔐 Verificar acceso del grupo
+    if not verificar_acceso(update.effective_chat.id):
         return
     
     # Ignorar mensajes sin texto
@@ -115,6 +152,15 @@ async def guardar_mensaje_handler(update: Update, context: ContextTypes.DEFAULT_
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /start - Bienvenida al bot"""
     
+    # 🔐 Verificar acceso del grupo
+    if update.effective_chat.type in ['group', 'supergroup']:
+        if not verificar_acceso(update.effective_chat.id):
+            await update.message.reply_text(
+                "⛔ Este grupo no tiene acceso autorizado a este bot.",
+                parse_mode='HTML'
+            )
+            return
+    
     # Verificar si es admin para mostrar comandos adicionales
     is_admin = False
     if update.effective_chat.type in ['group', 'supergroup']:
@@ -150,6 +196,11 @@ Estoy guardando todos los mensajes de este grupo para poder hacer resúmenes.
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /help"""
+    # 🔐 Verificar acceso del grupo
+    if update.effective_chat.type in ['group', 'supergroup']:
+        if not verificar_acceso(update.effective_chat.id):
+            return
+    
     await start(update, context)
 
 async def es_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -169,6 +220,14 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type not in ['group', 'supergroup']:
         await update.message.reply_text(
             "❌ Este comando solo funciona en grupos."
+        )
+        return
+    
+    # 🔐 Verificar acceso del grupo
+    if not verificar_acceso(update.effective_chat.id):
+        await update.message.reply_text(
+            "⛔ Este grupo no tiene acceso autorizado a este bot.",
+            parse_mode='HTML'
         )
         return
     
@@ -252,6 +311,14 @@ async def borrar_todo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
+    # 🔐 Verificar acceso del grupo
+    if not verificar_acceso(update.effective_chat.id):
+        await update.message.reply_text(
+            "⛔ Este grupo no tiene acceso autorizado a este bot.",
+            parse_mode='HTML'
+        )
+        return
+    
     # Verificar si es admin
     if not await es_admin(update, context):
         await update.message.reply_text(
@@ -304,6 +371,14 @@ async def borrar_rango(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type not in ['group', 'supergroup']:
         await update.message.reply_text(
             "❌ Este comando solo funciona en grupos."
+        )
+        return
+    
+    # 🔐 Verificar acceso del grupo
+    if not verificar_acceso(update.effective_chat.id):
+        await update.message.reply_text(
+            "⛔ Este grupo no tiene acceso autorizado a este bot.",
+            parse_mode='HTML'
         )
         return
     
@@ -400,6 +475,14 @@ async def resumen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
+    # 🔐 Verificar acceso del grupo
+    if not verificar_acceso(update.effective_chat.id):
+        await update.message.reply_text(
+            "⛔ Este grupo no tiene acceso autorizado a este bot.",
+            parse_mode='HTML'
+        )
+        return
+    
     # Obtener el número de horas (por defecto 24)
     horas = 24
     if context.args and context.args[0].isdigit():
@@ -452,6 +535,14 @@ async def resumen_desde(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type not in ['group', 'supergroup']:
         await update.message.reply_text(
             "❌ Este comando solo funciona en grupos."
+        )
+        return
+    
+    # 🔐 Verificar acceso del grupo
+    if not verificar_acceso(update.effective_chat.id):
+        await update.message.reply_text(
+            "⛔ Este grupo no tiene acceso autorizado a este bot.",
+            parse_mode='HTML'
         )
         return
     
@@ -606,6 +697,7 @@ def main():
     # Registrar comandos
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("chatid", chatid))  # 🆕 Comando para obtener ID del chat
     application.add_handler(CommandHandler("resumen", resumen))
     application.add_handler(CommandHandler("resumen_desde", resumen_desde))
     application.add_handler(CommandHandler("stats", stats))
