@@ -43,3 +43,13 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Tokens and credentials
+*token*.txt
+*api*.txt
+*key*.txt
