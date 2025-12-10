@@ -120,33 +120,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in ['group', 'supergroup']:
         is_admin = await es_admin(update, context)
     
-    welcome_message = """🤖 *Bot de Resúmenes de Grupo*
+    welcome_message = """🤖 <b>Bot de Resúmenes de Grupo</b>
 
 Estoy guardando todos los mensajes de este grupo para poder hacer resúmenes.
 
-*Comandos disponibles:*
-/resumen \[horas\] \- Resume las últimas N horas (por defecto: 24h)
-/resumen\_desde HH:MM \- Resume desde una hora específica
-/stats \- Muestra estadísticas de mensajes guardados
-/help \- Muestra esta ayuda
+<b>Comandos disponibles:</b>
+/resumen [horas] - Resume las últimas N horas (por defecto: 24h)
+/resumen_desde HH:MM - Resume desde una hora específica
+/stats - Muestra estadísticas de mensajes guardados
+/help - Muestra esta ayuda
 
-*Ejemplos:*
-• /resumen \- Resume últimas 24 horas
-• /resumen 3 \- Resume últimas 3 horas
-• /resumen\_desde 14:30 \- Resume desde las 14:30"""
+<b>Ejemplos:</b>
+• /resumen - Resume últimas 24 horas
+• /resumen 3 - Resume últimas 3 horas
+• /resumen_desde 14:30 - Resume desde las 14:30"""
     
     if is_admin:
         welcome_message += """
 
-*Comandos de Admin:*
-🔐 /borrar\_todo \- Borra TODOS los mensajes guardados
-🔐 /borrar\_rango YYYY\-MM\-DD YYYY\-MM\-DD \- Borra mensajes entre dos fechas
+<b>Comandos de Admin:</b>
+🔐 /borrar_todo - Borra TODOS los mensajes guardados
+🔐 /borrar_rango YYYY-MM-DD YYYY-MM-DD - Borra mensajes entre dos fechas
 
-*Ejemplos:*
-• /borrar\_todo \- Borra todo
-• /borrar\_rango 2024\-12\-01 2024\-12\-10 \- Borra del 1 al 10 dic"""
+<b>Ejemplos:</b>
+• /borrar_todo - Borra todo
+• /borrar_rango 2024-12-01 2024-12-10 - Borra del 1 al 10 dic"""
     
-    await update.message.reply_text(welcome_message, parse_mode='MarkdownV2')
+    await update.message.reply_text(welcome_message, parse_mode='HTML')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /help"""
