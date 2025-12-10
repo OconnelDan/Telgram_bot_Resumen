@@ -21,8 +21,7 @@ OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 # Para obtener el ID de un grupo, agrega el bot y usa /chatid
 # Deja la lista vacía [] para permitir todos los grupos
 GRUPOS_PERMITIDOS = [
-    # -1001234567890,  # Ejemplo: ID de grupo
-    # -1009876543210,  # Ejemplo: Otro grupo
+    -1001660210142,  # BoardGames "La Sagra"
 ]
 
 # Cliente de OpenAI
