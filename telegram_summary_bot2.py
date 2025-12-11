@@ -3,7 +3,7 @@ import sqlite3
 import requests
 import xml.etree.ElementTree as ET
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
@@ -16,8 +16,6 @@ from telegram.ext import (
 )
 from telegram.error import BadRequest
 from openai import OpenAI
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
 
 # Configuración
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
@@ -1084,21 +1082,20 @@ def main():
         )
     )
     
-    # 🆕 Configurar scheduler para preguntas automáticas
-    scheduler = AsyncIOScheduler()
+    # 🆕 Configurar jobs para preguntas automáticas (usar JobQueue nativo)
+    job_queue = application.job_queue
     
-    # Enviar pregunta diaria a horas aleatorias entre 10:00-22:00
-    for hora in [11, 15, 19]:  # 3 momentos del día
-        scheduler.add_job(
+    # Programar preguntas diarias en 3 horarios
+    for hora in [11, 15, 19]:
+        job_queue.run_daily(
             enviar_pregunta_automatica,
-            trigger=CronTrigger(hour=hora, minute=random.randint(0, 59)),
-            args=[application],
-            id=f'pregunta_diaria_{hora}',
-            replace_existing=True
+            time=time(hour=hora, minute=random.randint(0, 59)),
+            days=(0, 1, 2, 3, 4, 5, 6),  # Todos los días
+            data=application,
+            name=f'pregunta_diaria_{hora}'
         )
     
-    scheduler.start()
-    print("⏰ Scheduler de preguntas automáticas iniciado")
+    print("⏰ Jobs de preguntas automáticas programados")
     
     # Iniciar bot
     print("🤖 Bot iniciado correctamente")
