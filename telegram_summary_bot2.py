@@ -881,7 +881,15 @@ async def buscar_juego_bgg(nombre_juego: str) -> dict:
         # Buscar en BGG API
         search_url = f"https://boardgamegeek.com/xmlapi2/search?query={requests.utils.quote(nombre_juego)}&type=boardgame"
         print(f"🌐 BGG: URL búsqueda: {search_url}")
-        response = requests.get(search_url, timeout=10)
+        
+        # Headers HTTP para identificarnos como un navegador válido
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/xml, text/xml, */*',
+            'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8'
+        }
+        
+        response = requests.get(search_url, headers=headers, timeout=10)
         
         print(f"📡 BGG: Status Code: {response.status_code}")
         if response.status_code != 200:
@@ -903,7 +911,7 @@ async def buscar_juego_bgg(nombre_juego: str) -> dict:
         
         # Obtener detalles del juego
         details_url = f"https://boardgamegeek.com/xmlapi2/thing?id={bgg_id}&stats=1"
-        details_response = requests.get(details_url, timeout=10)
+        details_response = requests.get(details_url, headers=headers, timeout=10)
         
         if details_response.status_code != 200:
             return None
