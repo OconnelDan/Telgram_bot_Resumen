@@ -1,5 +1,8 @@
 import os
 import sqlite3
+import requests
+import xml.etree.ElementTree as ET
+import random
 from datetime import datetime, timedelta
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -11,11 +14,15 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
+from telegram.error import BadRequest
 from openai import OpenAI
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 # Configuración
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+BGG_API_TOKEN = os.environ.get('BGG_API_TOKEN')
 
 # 🔐 CONTROL DE ACCESO: Lista de IDs de grupos permitidos
 # Para obtener el ID de un grupo, agrega el bot y usa /chatid
@@ -53,6 +60,7 @@ def inicializar_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
+    # Tabla de mensajes
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS mensajes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,9 +80,66 @@ def inicializar_db():
         ON mensajes(chat_id, timestamp)
     ''')
     
+    # Tabla de preguntas automáticas
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS preguntas_historial (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            pregunta_id INTEGER,
+            timestamp DATETIME,
+            UNIQUE(chat_id, pregunta_id, timestamp)
+        )
+    ''')
+    
+    # Tabla de caché de juegos BGG
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bgg_cache (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_name TEXT,
+            bgg_id INTEGER,
+            image_url TEXT,
+            min_players INTEGER,
+            max_players INTEGER,
+            best_players TEXT,
+            playtime INTEGER,
+            weight REAL,
+            year_published INTEGER,
+            rank INTEGER,
+            bgg_link TEXT,
+            timestamp DATETIME,
+            UNIQUE(game_name)
+        )
+    ''')
+    
     conn.commit()
     conn.close()
     print("✅ Base de datos inicializada")
+
+# ============================
+# ERROR HANDLER
+# ============================
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja errores globales del bot"""
+    error_message = str(context.error)
+    
+    # Ignorar errores comunes cuando el bot se despierta
+    if "Message to be replied not found" in error_message:
+        print("⚠️ Mensaje antiguo no encontrado (bot despertó de inactividad)")
+        return
+    
+    if "Message is not modified" in error_message:
+        print("⚠️ Mensaje no modificado (mismo contenido)")
+        return
+    
+    # Log otros errores para debugging
+    print(f"❌ Error capturado: {error_message}")
+    if update:
+        print(f"📍 Update: {update}")
+
+# ============================
+# CONTROL DE ACCESO
+# ============================
 
 def verificar_acceso(chat_id: int) -> bool:
     """Verifica si el grupo tiene permiso para usar el bot"""
@@ -100,6 +165,106 @@ async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💡 Copia este ID para agregarlo a GRUPOS_PERMITIDOS"""
     
     await update.message.reply_text(mensaje, parse_mode='HTML')
+
+# ============================
+# SISTEMA DE PREGUNTAS AUTOMÁTICAS
+# ============================
+
+PREGUNTAS_JUEGOS = [
+    {"dias": [0, 1], "pregunta": "¿Qué te gustaría jugar esta semana? 🎲"},
+    {"dias": [2, 3], "pregunta": "¿Qué jugarás este fin de semana? 🎯"},
+    {"dias": [4], "pregunta": "¿Qué tenéis preparado para este finde? 🃏"},
+    {"dias": [5, 6], "pregunta": "¿Qué estáis jugando hoy? 🎮"},
+    {"dias": None, "pregunta": "¿Cuál es para ti la mejor feria de juegos de mesa? 🏆"},
+    {"dias": None, "pregunta": "¿Qué partida te dejó mejor recuerdo y por qué? 💭"},
+    {"dias": None, "pregunta": "Si pudieras jugar solo a un juego el resto de tu vida, ¿cuál sería? 🎲"},
+    {"dias": None, "pregunta": "¿Cuál es el juego más sobrevalorado en tu opinión? 🤔"},
+    {"dias": None, "pregunta": "¿Cuál es el juego más infravalorado que conoces? 💎"},
+    {"dias": None, "pregunta": "¿Prefieres juegos cooperativos o competitivos? ¿Por qué? 🤝⚔️"},
+    {"dias": None, "pregunta": "¿Cuál fue el último juego que descubriste y te sorprendió? ✨"},
+    {"dias": None, "pregunta": "¿Qué expansión de un juego consideras imprescindible? 📦"},
+    {"dias": None, "pregunta": "¿Cuál es tu juego favorito para 2 jugadores? 👥"},
+    {"dias": None, "pregunta": "¿Qué juego te gustaría probar pero aún no has jugado? 🆕"},
+    {"dias": None, "pregunta": "¿Cuál es el juego más difícil de explicar que conoces? 📚"},
+    {"dias": None, "pregunta": "¿Tienes alguna anécdota divertida de una partida? 😂"},
+    {"dias": None, "pregunta": "¿Qué mecánica de juego te gusta más? 🔧"},
+    {"dias": None, "pregunta": "¿Cuál es tu juego de mesa más antiguo? 🕰️"},
+    {"dias": None, "pregunta": "¿Qué diseñador de juegos admiras más? 🎨"},
+    {"dias": None, "pregunta": "¿Party games o juegos estratégicos? 🎉🧠"},
+]
+
+async def puede_enviar_pregunta(chat_id: int, pregunta_id: int) -> bool:
+    """Verifica si ha pasado 1 semana desde la última vez que se hizo esta pregunta"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    una_semana_atras = datetime.now() - timedelta(days=7)
+    
+    cursor.execute('''
+        SELECT timestamp FROM preguntas_historial
+        WHERE chat_id = ? AND pregunta_id = ?
+        ORDER BY timestamp DESC LIMIT 1
+    ''', (chat_id, pregunta_id))
+    
+    resultado = cursor.fetchone()
+    conn.close()
+    
+    if not resultado:
+        return True  # Primera vez que se hace esta pregunta
+    
+    ultima_vez = datetime.fromisoformat(resultado[0])
+    return datetime.now() > (ultima_vez + timedelta(days=7))
+
+async def enviar_pregunta_automatica(application: Application):
+    """Envía una pregunta automática al grupo"""
+    if not GRUPOS_PERMITIDOS:
+        return
+    
+    for chat_id in GRUPOS_PERMITIDOS:
+        try:
+            dia_semana = datetime.now().weekday()  # 0=Lunes, 6=Domingo
+            
+            # Filtrar preguntas disponibles para hoy
+            preguntas_disponibles = [
+                (i, p) for i, p in enumerate(PREGUNTAS_JUEGOS)
+                if p["dias"] is None or dia_semana in p["dias"]
+            ]
+            
+            # Filtrar por cooldown de 1 semana
+            preguntas_validas = []
+            for idx, pregunta in preguntas_disponibles:
+                if await puede_enviar_pregunta(chat_id, idx):
+                    preguntas_validas.append((idx, pregunta))
+            
+            if not preguntas_validas:
+                print(f"⏳ No hay preguntas disponibles para chat {chat_id}")
+                continue
+            
+            # Elegir pregunta aleatoria
+            pregunta_id, pregunta_data = random.choice(preguntas_validas)
+            
+            # Enviar pregunta
+            mensaje = f"💬 <b>Pregunta del día</b>\n\n{pregunta_data['pregunta']}"
+            await application.bot.send_message(
+                chat_id=chat_id,
+                text=mensaje,
+                parse_mode='HTML'
+            )
+            
+            # Registrar en historial
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO preguntas_historial (chat_id, pregunta_id, timestamp)
+                VALUES (?, ?, ?)
+            ''', (chat_id, pregunta_id, datetime.now()))
+            conn.commit()
+            conn.close()
+            
+            print(f"✅ Pregunta enviada a chat {chat_id}: {pregunta_data['pregunta']}")
+            
+        except Exception as e:
+            print(f"❌ Error enviando pregunta a {chat_id}: {e}")
 
 async def guardar_mensaje_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Guarda todos los mensajes del grupo en la base de datos"""
@@ -673,6 +838,208 @@ Mantén el resumen conciso pero informativo."""
     except Exception as e:
         return f"❌ No se pudo generar el resumen: {str(e)}"
 
+# ============================
+# INTEGRACIÓN BGG API
+# ============================
+
+async def buscar_juego_bgg(nombre_juego: str) -> dict:
+    """Busca un juego en BoardGameGeek API"""
+    try:
+        # Verificar caché primero
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT * FROM bgg_cache
+            WHERE LOWER(game_name) = LOWER(?)
+            AND timestamp > ?
+        ''', (nombre_juego, datetime.now() - timedelta(days=30)))
+        
+        cached = cursor.fetchone()
+        conn.close()
+        
+        if cached:
+            return {
+                'bgg_id': cached[2],
+                'image_url': cached[3],
+                'min_players': cached[4],
+                'max_players': cached[5],
+                'best_players': cached[6],
+                'playtime': cached[7],
+                'weight': cached[8],
+                'year': cached[9],
+                'rank': cached[10],
+                'link': cached[11],
+                'from_cache': True
+            }
+        
+        # Buscar en BGG API
+        search_url = f"https://boardgamegeek.com/xmlapi2/search?query={requests.utils.quote(nombre_juego)}&type=boardgame"
+        response = requests.get(search_url, timeout=10)
+        
+        if response.status_code != 200:
+            return None
+        
+        root = ET.fromstring(response.content)
+        items = root.findall('.//item')
+        
+        if not items:
+            return None
+        
+        # Tomar el primer resultado
+        bgg_id = items[0].get('id')
+        
+        # Obtener detalles del juego
+        details_url = f"https://boardgamegeek.com/xmlapi2/thing?id={bgg_id}&stats=1"
+        details_response = requests.get(details_url, timeout=10)
+        
+        if details_response.status_code != 200:
+            return None
+        
+        details_root = ET.fromstring(details_response.content)
+        item = details_root.find('.//item')
+        
+        if not item:
+            return None
+        
+        # Extraer información
+        name = item.find('.//name[@type="primary"]')
+        image = item.find('.//image')
+        min_players = item.find('.//minplayers')
+        max_players = item.find('.//maxplayers')
+        playtime = item.find('.//playingtime')
+        year = item.find('.//yearpublished')
+        
+        # Polls para mejor número de jugadores
+        best_players_list = []
+        poll = item.find('.//poll[@name="suggested_numplayers"]')
+        if poll is not None:
+            for result in poll.findall('.//results'):
+                num = result.get('numplayers')
+                best_votes = 0
+                for r in result.findall('.//result'):
+                    if r.get('value') == 'Best':
+                        best_votes = int(r.get('numvotes', 0))
+                if best_votes > 0:
+                    best_players_list.append((num, best_votes))
+        
+        best_players_list.sort(key=lambda x: x[1], reverse=True)
+        best_players = ', '.join([x[0] for x in best_players_list[:3]]) if best_players_list else "N/A"
+        
+        # Peso/complejidad
+        weight_elem = item.find('.//averageweight')
+        weight = float(weight_elem.get('value', 0)) if weight_elem is not None else 0
+        
+        # Ranking
+        rank_elem = item.find('.//rank[@type="subtype"]')
+        rank = int(rank_elem.get('value', 0)) if rank_elem is not None and rank_elem.get('value') != 'Not Ranked' else None
+        
+        game_data = {
+            'bgg_id': int(bgg_id),
+            'image_url': image.text if image is not None else None,
+            'min_players': int(min_players.get('value', 0)) if min_players is not None else 0,
+            'max_players': int(max_players.get('value', 0)) if max_players is not None else 0,
+            'best_players': best_players,
+            'playtime': int(playtime.get('value', 0)) if playtime is not None else 0,
+            'weight': round(weight, 2),
+            'year': int(year.get('value', 0)) if year is not None else 0,
+            'rank': rank,
+            'link': f"https://boardgamegeek.com/boardgame/{bgg_id}",
+            'from_cache': False
+        }
+        
+        # Guardar en caché
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO bgg_cache 
+            (game_name, bgg_id, image_url, min_players, max_players, best_players, 
+             playtime, weight, year_published, rank, bgg_link, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (nombre_juego, game_data['bgg_id'], game_data['image_url'], 
+              game_data['min_players'], game_data['max_players'], game_data['best_players'],
+              game_data['playtime'], game_data['weight'], game_data['year'], 
+              game_data['rank'], game_data['link'], datetime.now()))
+        conn.commit()
+        conn.close()
+        
+        return game_data
+        
+    except Exception as e:
+        print(f"❌ Error buscando juego en BGG: {e}")
+        return None
+
+async def datos_juego(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /datos - Busca información de un juego en BGG"""
+    
+    # Verificar acceso del grupo
+    if update.effective_chat.type in ['group', 'supergroup']:
+        if not verificar_acceso(update.effective_chat.id):
+            return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "⚠️ <b>Uso:</b> /datos <i>nombre del juego</i>\n\n"
+            "<b>Ejemplos:</b>\n"
+            "• /datos Catan\n"
+            "• /datos Ark Nova\n"
+            "• /datos Spirit Island",
+            parse_mode='HTML'
+        )
+        return
+    
+    nombre_juego = ' '.join(context.args)
+    
+    await update.message.reply_text(
+        f"🔍 Buscando <b>{nombre_juego}</b> en BoardGameGeek...",
+        parse_mode='HTML'
+    )
+    
+    juego = await buscar_juego_bgg(nombre_juego)
+    
+    if not juego:
+        await update.message.reply_text(
+            f"😕 No se encontró el juego <b>{nombre_juego}</b>\n\n"
+            "💡 <i>Intenta con el nombre exacto o en inglés</i>",
+            parse_mode='HTML'
+        )
+        return
+    
+    # Construir mensaje
+    mensaje = f"🎲 <b>{nombre_juego.title()}</b>\n\n"
+    mensaje += f"👥 <b>Jugadores:</b> {juego['min_players']}-{juego['max_players']}\n"
+    
+    if juego['best_players'] != "N/A":
+        mensaje += f"   🏆 <i>Óptimo con: {juego['best_players']}</i>\n"
+    
+    mensaje += f"⏱️ <b>Duración:</b> {juego['playtime']} min\n"
+    mensaje += f"⚖️ <b>Complejidad:</b> {juego['weight']}/5\n"
+    
+    if juego['year']:
+        mensaje += f"📅 <b>Año:</b> {juego['year']}\n"
+    
+    if juego['rank']:
+        mensaje += f"🏆 <b>Ranking BGG:</b> #{juego['rank']}\n"
+    
+    mensaje += f"\n📖 <a href='{juego['link']}'>Ver en BoardGameGeek</a>"
+    
+    if juego.get('from_cache'):
+        mensaje += "\n\n💾 <i>(Datos en caché)</i>"
+    
+    try:
+        # Enviar imagen si existe
+        if juego['image_url']:
+            await update.message.reply_photo(
+                photo=juego['image_url'],
+                caption=mensaje,
+                parse_mode='HTML'
+            )
+        else:
+            await update.message.reply_text(mensaje, parse_mode='HTML', disable_web_page_preview=False)
+    except Exception as e:
+        # Si falla la imagen, enviar solo texto
+        await update.message.reply_text(mensaje, parse_mode='HTML', disable_web_page_preview=False)
+
 def main():
     """Función principal"""
     
@@ -696,7 +1063,8 @@ def main():
     # Registrar comandos
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("chatid", chatid))  # 🆕 Comando para obtener ID del chat
+    application.add_handler(CommandHandler("chatid", chatid))
+    application.add_handler(CommandHandler("datos", datos_juego))  # 🆕 Comando BGG
     application.add_handler(CommandHandler("resumen", resumen))
     application.add_handler(CommandHandler("resumen_desde", resumen_desde))
     application.add_handler(CommandHandler("stats", stats))
@@ -704,6 +1072,9 @@ def main():
     # Comandos de admin
     application.add_handler(CommandHandler("borrar_todo", borrar_todo))
     application.add_handler(CommandHandler("borrar_rango", borrar_rango))
+    
+    # 🆕 Error handler global
+    application.add_error_handler(error_handler)
     
     # Handler para guardar TODOS los mensajes
     application.add_handler(
@@ -713,9 +1084,26 @@ def main():
         )
     )
     
+    # 🆕 Configurar scheduler para preguntas automáticas
+    scheduler = AsyncIOScheduler()
+    
+    # Enviar pregunta diaria a horas aleatorias entre 10:00-22:00
+    for hora in [11, 15, 19]:  # 3 momentos del día
+        scheduler.add_job(
+            enviar_pregunta_automatica,
+            trigger=CronTrigger(hour=hora, minute=random.randint(0, 59)),
+            args=[application],
+            id=f'pregunta_diaria_{hora}',
+            replace_existing=True
+        )
+    
+    scheduler.start()
+    print("⏰ Scheduler de preguntas automáticas iniciado")
+    
     # Iniciar bot
     print("🤖 Bot iniciado correctamente")
     print("💾 Guardando todos los mensajes de los grupos...")
+    print("🎲 Integración BGG API activa")
     application.run_polling()
 
 if __name__ == '__main__':
