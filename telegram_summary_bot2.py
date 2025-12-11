@@ -3,7 +3,8 @@ import sqlite3
 import requests
 import xml.etree.ElementTree as ET
 import random
-from datetime import datetime, timedelta, time
+import time
+from datetime import datetime, timedelta, time as dt_time
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
@@ -1023,6 +1024,10 @@ async def buscar_juego_bgg(nombre_juego: str) -> dict:
         bgg_id = items[0].get('id')
         game_name = items[0].find('name').get('value') if items[0].find('name') is not None else nombre_juego
         print(f"✅ BGG: Primer resultado - ID: {bgg_id}, Nombre: {game_name}")
+        
+        # ⏳ RATE LIMITING: BGG requiere mínimo 5 segundos entre requests
+        print("⏳ BGG: Esperando 5s (rate limit)...")
+        time.sleep(5)
         
         # Obtener detalles del juego
         details_url = f"{BGG_API_BASE}/thing"
