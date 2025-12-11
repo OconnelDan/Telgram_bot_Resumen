@@ -1082,20 +1082,18 @@ def main():
         )
     )
     
-    # 🆕 Configurar jobs para preguntas automáticas (usar JobQueue nativo)
-    job_queue = application.job_queue
-    
-    # Programar preguntas diarias en 3 horarios
-    for hora in [11, 15, 19]:
-        job_queue.run_daily(
-            enviar_pregunta_automatica,
-            time=time(hour=hora, minute=random.randint(0, 59)),
-            days=(0, 1, 2, 3, 4, 5, 6),  # Todos los días
-            data=application,
-            name=f'pregunta_diaria_{hora}'
-        )
-    
-    print("⏰ Jobs de preguntas automáticas programados")
+    # 🆕 PREGUNTAS AUTOMÁTICAS DESACTIVADAS TEMPORALMENTE
+    # (Conflicto con Python 3.13 en Render - se reactivará cuando se solucione)
+    # job_queue = application.job_queue
+    # for hora in [11, 15, 19]:
+    #     job_queue.run_daily(
+    #         enviar_pregunta_automatica,
+    #         time=time(hour=hora, minute=random.randint(0, 59)),
+    #         days=(0, 1, 2, 3, 4, 5, 6),
+    #         data=application,
+    #         name=f'pregunta_diaria_{hora}'
+    #     )
+    # print("⏰ Jobs de preguntas automáticas programados")
     
     # Iniciar bot
     print("🤖 Bot iniciado correctamente")
