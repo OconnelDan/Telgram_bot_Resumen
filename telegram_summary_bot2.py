@@ -22,6 +22,25 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 BGG_API_TOKEN = os.environ.get('BGG_API_TOKEN')
 
+# 🎲 BGG API Configuration
+# Desde 2025, la XML API2 de BoardGameGeek requiere:
+# - Token de aplicación en Authorization: Bearer <token>
+# - Dominio sin www: https://boardgamegeek.com (no www.boardgamegeek.com)
+BGG_API_BASE = "https://boardgamegeek.com/xmlapi2"
+
+def bgg_headers() -> dict:
+    """
+    Cabeceras estándar para llamar a la XML API2 de BoardGameGeek.
+    Incluye el token de aplicación en Authorization si está definido.
+    """
+    headers = {
+        "User-Agent": "TelegramBGGBot/1.0 (Telegram Summary Bot)",
+        "Accept": "application/xml",
+    }
+    if BGG_API_TOKEN:
+        headers["Authorization"] = f"Bearer {BGG_API_TOKEN}"
+    return headers
+
 # 🔐 CONTROL DE ACCESO: Lista de IDs de grupos permitidos
 # Para obtener el ID de un grupo, agrega el bot y usa /chatid
 # Deja la lista vacía [] para permitir todos los grupos
@@ -879,19 +898,47 @@ async def buscar_juego_bgg(nombre_juego: str) -> dict:
             }
         
         # Buscar en BGG API
-        search_url = f"https://boardgamegeek.com/xmlapi2/search?query={requests.utils.quote(nombre_juego)}&type=boardgame"
-        print(f"🌐 BGG: URL búsqueda: {search_url}")
-        
-        # Headers HTTP para identificarnos como un navegador válido
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/xml, text/xml, */*',
-            'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8'
+        search_url = f"{BGG_API_BASE}/search"
+        params = {
+            "query": nombre_juego,
+            "type": "boardgame",
         }
+        print(f"🌐 BGG: URL búsqueda: {search_url}?query={nombre_juego}")
         
-        response = requests.get(search_url, headers=headers, timeout=10)
+        response = requests.get(
+            search_url,
+            params=params,
+            headers=bgg_headers(),
+            timeout=10,
+        )
         
-        print(f"📡 BGG: Status Code: {response.status_code}")
+        print(f"📡 BGG: Status Code búsqueda: {response.status_code}")
+        
+        # Manejo de código 401: token inválido o ausente
+        if response.status_code == 401:
+            print("❌ BGG: 401 Unauthorized en búsqueda. Revisa el token BGG_API_TOKEN y el dominio (sin www).")
+            return None
+        
+        # Manejo de código 202: BGG pone la respuesta en cola cuando está ocupado
+        # Reintentamos unas pocas veces con backoff simple
+        if response.status_code == 202:
+            print("⏳ BGG: Respuesta en cola (202), reintentando...")
+            for intento in range(3):
+                import time
+                time.sleep(2)
+                response = requests.get(
+                    search_url,
+                    params=params,
+                    headers=bgg_headers(),
+                    timeout=10,
+                )
+                print(f"📡 BGG: Reintento búsqueda {intento+1}, status: {response.status_code}")
+                if response.status_code == 200:
+                    break
+            if response.status_code != 200:
+                print("❌ BGG: No se obtuvo respuesta 200 tras reintentos en búsqueda.")
+                return None
+        
         if response.status_code != 200:
             print(f"❌ BGG: Error en búsqueda (status {response.status_code})")
             return None
@@ -910,10 +957,43 @@ async def buscar_juego_bgg(nombre_juego: str) -> dict:
         print(f"✅ BGG: Primer resultado - ID: {bgg_id}, Nombre: {game_name}")
         
         # Obtener detalles del juego
-        details_url = f"https://boardgamegeek.com/xmlapi2/thing?id={bgg_id}&stats=1"
-        details_response = requests.get(details_url, headers=headers, timeout=10)
+        details_url = f"{BGG_API_BASE}/thing"
+        details_params = {
+            "id": bgg_id,
+            "stats": 1,
+        }
+        details_response = requests.get(
+            details_url,
+            params=details_params,
+            headers=bgg_headers(),
+            timeout=10,
+        )
+        print(f"📡 BGG: Status Code detalles: {details_response.status_code}")
+        
+        if details_response.status_code == 401:
+            print("❌ BGG: 401 Unauthorized en detalles. Problema de token o dominio.")
+            return None
+        
+        if details_response.status_code == 202:
+            print("⏳ BGG: Respuesta en cola (202), reintentando detalles...")
+            for intento in range(3):
+                import time
+                time.sleep(2)
+                details_response = requests.get(
+                    details_url,
+                    params=details_params,
+                    headers=bgg_headers(),
+                    timeout=10,
+                )
+                print(f"📡 BGG: Reintento detalles {intento+1}, status: {details_response.status_code}")
+                if details_response.status_code == 200:
+                    break
+            if details_response.status_code != 200:
+                print("❌ BGG: No se obtuvo respuesta 200 tras reintentos en detalles.")
+                return None
         
         if details_response.status_code != 200:
+            print(f"❌ BGG: Error en detalles (status {details_response.status_code})")
             return None
         
         details_root = ET.fromstring(details_response.content)
