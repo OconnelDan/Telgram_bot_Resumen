@@ -630,8 +630,12 @@ async def borrar_rango(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def resumen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Genera un resumen de los mensajes del grupo"""
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    print(f"📝 /resumen ejecutado por @{user.username or user.first_name} en chat {chat_id}")
     
     if update.effective_chat.type not in ['group', 'supergroup']:
+        print(f"❌ /resumen: No es un grupo (tipo: {update.effective_chat.type})")
         await update.message.reply_text(
             "❌ Este comando solo funciona en grupos."
         )
@@ -639,6 +643,7 @@ async def resumen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # 🔐 Verificar acceso del grupo
     if not verificar_acceso(update.effective_chat.id):
+        print(f"🚫 /resumen: Acceso denegado para chat {chat_id}")
         await update.message.reply_text(
             "⛔ Este grupo no tiene acceso autorizado a este bot.",
             parse_mode='HTML'
@@ -842,6 +847,7 @@ Mantén el resumen conciso pero informativo."""
 
 async def buscar_juego_bgg(nombre_juego: str) -> dict:
     """Busca un juego en BoardGameGeek API"""
+    print(f"🔍 BGG: Buscando '{nombre_juego}'...")
     try:
         # Verificar caché primero
         conn = sqlite3.connect(DB_NAME)
@@ -857,6 +863,7 @@ async def buscar_juego_bgg(nombre_juego: str) -> dict:
         conn.close()
         
         if cached:
+            print(f"✅ BGG: Encontrado en caché (ID: {cached[2]})")
             return {
                 'bgg_id': cached[2],
                 'image_url': cached[3],
@@ -873,19 +880,26 @@ async def buscar_juego_bgg(nombre_juego: str) -> dict:
         
         # Buscar en BGG API
         search_url = f"https://boardgamegeek.com/xmlapi2/search?query={requests.utils.quote(nombre_juego)}&type=boardgame"
+        print(f"🌐 BGG: URL búsqueda: {search_url}")
         response = requests.get(search_url, timeout=10)
         
+        print(f"📡 BGG: Status Code: {response.status_code}")
         if response.status_code != 200:
+            print(f"❌ BGG: Error en búsqueda (status {response.status_code})")
             return None
         
         root = ET.fromstring(response.content)
         items = root.findall('.//item')
         
+        print(f"📊 BGG: Encontrados {len(items)} resultados")
         if not items:
+            print(f"❌ BGG: No se encontraron juegos para '{nombre_juego}'")
             return None
         
         # Tomar el primer resultado
         bgg_id = items[0].get('id')
+        game_name = items[0].find('name').get('value') if items[0].find('name') is not None else nombre_juego
+        print(f"✅ BGG: Primer resultado - ID: {bgg_id}, Nombre: {game_name}")
         
         # Obtener detalles del juego
         details_url = f"https://boardgamegeek.com/xmlapi2/thing?id={bgg_id}&stats=1"
@@ -964,18 +978,25 @@ async def buscar_juego_bgg(nombre_juego: str) -> dict:
         return game_data
         
     except Exception as e:
-        print(f"❌ Error buscando juego en BGG: {e}")
+        print(f"❌ BGG ERROR COMPLETO: {type(e).__name__}: {str(e)}")
+        import traceback
+        print(f"📍 BGG Traceback: {traceback.format_exc()}")
         return None
 
 async def datos_juego(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /datos - Busca información de un juego en BGG"""
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    print(f"🎮 /datos ejecutado por @{user.username or user.first_name} en chat {chat_id}")
     
     # Verificar acceso del grupo
     if update.effective_chat.type in ['group', 'supergroup']:
         if not verificar_acceso(update.effective_chat.id):
+            print(f"🚫 /datos: Acceso denegado para chat {chat_id}")
             return
     
     if not context.args:
+        print(f"⚠️ /datos: Sin argumentos")
         await update.message.reply_text(
             "⚠️ <b>Uso:</b> /datos <i>nombre del juego</i>\n\n"
             "<b>Ejemplos:</b>\n"
@@ -987,6 +1008,7 @@ async def datos_juego(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     nombre_juego = ' '.join(context.args)
+    print(f"🎲 /datos: Buscando '{nombre_juego}'")
     
     await update.message.reply_text(
         f"🔍 Buscando <b>{nombre_juego}</b> en BoardGameGeek...",
@@ -994,6 +1016,7 @@ async def datos_juego(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     juego = await buscar_juego_bgg(nombre_juego)
+    print(f"📦 /datos: Resultado búsqueda = {juego is not None}")
     
     if not juego:
         await update.message.reply_text(
