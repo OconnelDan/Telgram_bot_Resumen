@@ -864,6 +864,50 @@ Mantén el resumen conciso pero informativo."""
 # INTEGRACIÓN BGG API
 # ============================
 
+def limpiar_html(texto_html: str) -> str:
+    """Limpia tags HTML de un texto"""
+    import re
+    # Eliminar tags HTML
+    texto = re.sub(r'<[^>]+>', '', texto_html)
+    # Decodificar entidades HTML comunes
+    texto = texto.replace('&quot;', '"').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+    texto = texto.replace('&#10;', '\n').replace('&rsquo;', "'").replace('&mdash;', '—')
+    return texto.strip()
+
+async def resumir_descripcion_bgg(descripcion: str) -> str:
+    """Resume la descripción de un juego usando OpenAI"""
+    try:
+        # Limpiar HTML
+        descripcion_limpia = limpiar_html(descripcion)
+        
+        # Si es muy corta, devolverla tal cual
+        if len(descripcion_limpia) < 200:
+            return descripcion_limpia
+        
+        prompt = f"""Resume esta descripción de un juego de mesa en MÁXIMO 2-3 frases cortas (unos 150 caracteres). Debe ser conciso y captar la esencia del juego.
+
+Descripción original:
+{descripcion_limpia[:1000]}
+
+Resume:"""
+        
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Eres un experto en juegos de mesa que resume descripciones de forma clara y concisa."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=150,
+            temperature=0.7
+        )
+        
+        return response.choices[0].message.content.strip()
+        
+    except Exception as e:
+        print(f"⚠️ Error resumiendo descripción: {e}")
+        # Si falla, devolver los primeros 200 caracteres limpios
+        return limpiar_html(descripcion)[:200] + "..."
+
 async def buscar_juego_bgg(nombre_juego: str) -> dict:
     """Busca un juego en BoardGameGeek API"""
     print(f"🔍 BGG: Buscando '{nombre_juego}'...")
@@ -872,8 +916,30 @@ async def buscar_juego_bgg(nombre_juego: str) -> dict:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         
+        # Crear tabla actualizada si no existe
         cursor.execute('''
-            SELECT * FROM bgg_cache
+            CREATE TABLE IF NOT EXISTS bgg_cache_v2 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_name TEXT,
+                bgg_id INTEGER,
+                image_url TEXT,
+                min_players INTEGER,
+                max_players INTEGER,
+                best_players TEXT,
+                playtime INTEGER,
+                weight REAL,
+                year_published INTEGER,
+                rank INTEGER,
+                bgg_link TEXT,
+                description TEXT,
+                mechanics TEXT,
+                timestamp DATETIME,
+                UNIQUE(game_name)
+            )
+        ''')
+        
+        cursor.execute('''
+            SELECT * FROM bgg_cache_v2
             WHERE LOWER(game_name) = LOWER(?)
             AND timestamp > ?
         ''', (nombre_juego, datetime.now() - timedelta(days=30)))
@@ -894,6 +960,8 @@ async def buscar_juego_bgg(nombre_juego: str) -> dict:
                 'year': cached[9],
                 'rank': cached[10],
                 'link': cached[11],
+                'description': cached[12],
+                'mechanics': cached[13],
                 'from_cache': True
             }
         
@@ -1002,13 +1070,26 @@ async def buscar_juego_bgg(nombre_juego: str) -> dict:
         if not item:
             return None
         
-        # Extraer información
+        # Extraer información básica
         name = item.find('.//name[@type="primary"]')
         image = item.find('.//image')
         min_players = item.find('.//minplayers')
         max_players = item.find('.//maxplayers')
         playtime = item.find('.//playingtime')
         year = item.find('.//yearpublished')
+        
+        # 🆕 Descripción
+        description_elem = item.find('.//description')
+        description_raw = description_elem.text if description_elem is not None else ""
+        description_summary = await resumir_descripcion_bgg(description_raw) if description_raw else "Sin descripción disponible"
+        
+        # 🆕 Mecánicas
+        mechanics_list = []
+        for link in item.findall('.//link[@type="boardgamemechanic"]'):
+            mechanic_name = link.get('value')
+            if mechanic_name:
+                mechanics_list.append(mechanic_name)
+        mechanics_str = ", ".join(mechanics_list[:5]) if mechanics_list else "N/A"  # Máximo 5 mecánicas
         
         # Polls para mejor número de jugadores
         best_players_list = []
@@ -1045,6 +1126,8 @@ async def buscar_juego_bgg(nombre_juego: str) -> dict:
             'year': int(year.get('value', 0)) if year is not None else 0,
             'rank': rank,
             'link': f"https://boardgamegeek.com/boardgame/{bgg_id}",
+            'description': description_summary,
+            'mechanics': mechanics_str,
             'from_cache': False
         }
         
@@ -1052,14 +1135,15 @@ async def buscar_juego_bgg(nombre_juego: str) -> dict:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT OR REPLACE INTO bgg_cache 
+            INSERT OR REPLACE INTO bgg_cache_v2 
             (game_name, bgg_id, image_url, min_players, max_players, best_players, 
-             playtime, weight, year_published, rank, bgg_link, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             playtime, weight, year_published, rank, bgg_link, description, mechanics, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (nombre_juego, game_data['bgg_id'], game_data['image_url'], 
               game_data['min_players'], game_data['max_players'], game_data['best_players'],
               game_data['playtime'], game_data['weight'], game_data['year'], 
-              game_data['rank'], game_data['link'], datetime.now()))
+              game_data['rank'], game_data['link'], game_data['description'], 
+              game_data['mechanics'], datetime.now()))
         conn.commit()
         conn.close()
         
@@ -1116,6 +1200,11 @@ async def datos_juego(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Construir mensaje
     mensaje = f"🎲 <b>{nombre_juego.title()}</b>\n\n"
+    
+    # 🆕 Descripción
+    if juego.get('description') and juego['description'] != "Sin descripción disponible":
+        mensaje += f"<i>{juego['description']}</i>\n\n"
+    
     mensaje += f"👥 <b>Jugadores:</b> {juego['min_players']}-{juego['max_players']}\n"
     
     if juego['best_players'] != "N/A":
@@ -1129,6 +1218,10 @@ async def datos_juego(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if juego['rank']:
         mensaje += f"🏆 <b>Ranking BGG:</b> #{juego['rank']}\n"
+    
+    # 🆕 Mecánicas
+    if juego.get('mechanics') and juego['mechanics'] != "N/A":
+        mensaje += f"\n🔧 <b>Mecánicas:</b> {juego['mechanics']}\n"
     
     mensaje += f"\n📖 <a href='{juego['link']}'>Ver en BoardGameGeek</a>"
     
